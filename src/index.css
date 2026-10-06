@@ -1,0 +1,68 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer utilities {
+  @keyframes eq-pulse {
+    0%, 100% { height: 4px; }
+    50% { height: 16px; }
+  }
+  .animate-eq-1 {
+    animation: eq-pulse 0.7s ease-in-out infinite alternate;
+  }
+  .animate-eq-2 {
+    animation: eq-pulse 0.9s ease-in-out 0.2s infinite alternate;
+  }
+  .animate-eq-3 {
+    animation: eq-pulse 0.6s ease-in-out 0.4s infinite alternate;
+  }
+}
+
+/* iOS-grade smooth scrolling and tap states */
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  background-color: #09080F;
+  color: #FFFFFF;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+  user-select: none;
+}
+
+/* iOS WebKit Range Slider Touch Optimization */
+.ios-scrubber {
+  -webkit-appearance: none;
+  appearance: none;
+  outline: none;
+  border: none;
+}
+
+/* Chrome / Safari / iOS WebKit Thumb */
+.ios-scrubber::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 0 10px rgba(236, 72, 153, 0.6);
+  cursor: pointer;
+  transition: transform 0.1s ease;
+}
+
+.ios-scrubber:active::-webkit-slider-thumb {
+  transform: scale(1.25);
+  box-shadow: 0 0 16px rgba(236, 72, 153, 0.9);
+}
+
+/* Firefox Thumb */
+.ios-scrubber::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: none;
+  box-shadow: 0 0 10px rgba(236, 72, 153, 0.6);
+  cursor: pointer;
+}
