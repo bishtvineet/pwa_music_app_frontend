@@ -1,19 +1,22 @@
-import { get, set, del, entries } from 'idb-keyval';
+import { entries, del } from 'idb-keyval';
 import type { Track } from '../types';
 
-const TRACK_PREFIX = 'track:';
+const DB_NAME = 'music_app_db';
+const DB_VERSION = 1;
+const STORE_NAME = 'tracks';
+const LEGACY_PREFIX = 'track:';
 
-export interface StoredTrackRecord {
+export interface StoredTrackEntity {
   id: string;
   title: string;
   artist: string;
   duration: number;
   durationFormatted: string;
-  thumbnailUrl: string;
-  createdAt: number;
-  mimeType?: string;
-  audioBuffer?: ArrayBuffer | Uint8Array;
-  blob?: Blob; // Support legacy format from initial downloads
+  audioBlob: Blob;
+  thumbnailBlob?: Blob;
+  thumbnailUrl?: string;
+  downloadedAt: number;
+  createdAt?: number;
 }
 
 export interface CleanupResult {
@@ -22,117 +25,225 @@ export interface CleanupResult {
   prunedCount: number;
 }
 
-// Convert Track (with Blob) to StoredTrackRecord (with Uint8Array) before writing
-export const saveTrack = async (track: Track): Promise<void> => {
-  const buffer = await track.blob.arrayBuffer();
-  const uint8Array = new Uint8Array(buffer);
+// Open or initialize IndexedDB native instance
+const openDB = (): Promise<IDBDatabase> => {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
 
-  const record: StoredTrackRecord = {
+    request.onupgradeneeded = (event) => {
+      const db = (event.target as IDBOpenDBRequest).result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+      }
+    };
+
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+};
+
+// Converts Base64 Data URL to Blob (for thumbnail storage)
+export const dataUrlToBlob = (dataUrl: string): Blob | undefined => {
+  try {
+    if (!dataUrl || !dataUrl.startsWith('data:')) return undefined;
+    const parts = dataUrl.split(',');
+    const mime = parts[0].match(/:(.*?);/)?.[1] || 'image/jpeg';
+    const binary = atob(parts[1]);
+    const array = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      array[i] = binary.charCodeAt(i);
+    }
+    return new Blob([array], { type: mime });
+  } catch {
+    return undefined;
+  }
+};
+
+// Convert Blob to Base64 (for UI rendering fallback)
+export const blobToDataUrl = (blob: Blob): Promise<string> => {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve((reader.result as string) || '');
+    reader.onerror = () => resolve('');
+    reader.readAsDataURL(blob);
+  });
+};
+
+// Save a track to music_app_db (tracks store)
+export const saveTrack = async (track: Track): Promise<void> => {
+  const db = await openDB();
+
+  const audioBlob = track.audioBlob || track.blob;
+  let thumbnailBlob = track.thumbnailBlob;
+
+  if (!thumbnailBlob && track.thumbnailUrl?.startsWith('data:')) {
+    thumbnailBlob = dataUrlToBlob(track.thumbnailUrl);
+  }
+
+  const record: StoredTrackEntity = {
     id: track.id,
     title: track.title,
     artist: track.artist,
     duration: track.duration,
     durationFormatted: track.durationFormatted,
+    audioBlob,
+    thumbnailBlob,
     thumbnailUrl: track.thumbnailUrl,
-    audioBuffer: uint8Array,
-    mimeType: track.blob.type || 'audio/mpeg',
-    createdAt: track.createdAt,
+    downloadedAt: track.downloadedAt || track.createdAt || Date.now(),
+    createdAt: track.createdAt || Date.now(),
   };
 
-  await set(`${TRACK_PREFIX}${track.id}`, record);
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    const req = store.put(record);
+
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  });
 };
 
-// Rebuild Blob from stored binary buffer or legacy blob
+// Retrieve a single track by ID
 export const getTrack = async (id: string): Promise<Track | undefined> => {
-  const record = await get<StoredTrackRecord>(`${TRACK_PREFIX}${id}`);
-  if (!record) return undefined;
+  const db = await openDB();
 
-  let restoredBlob: Blob | null = null;
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readonly');
+    const store = tx.objectStore(STORE_NAME);
+    const req = store.get(id);
 
-  if (record.audioBuffer) {
-    restoredBlob = new Blob([record.audioBuffer as BlobPart], {
-      type: record.mimeType || 'audio/mpeg',
-    });
-  } else if (record.blob && record.blob.size > 0) {
-    restoredBlob = record.blob;
-  }
+    req.onsuccess = async () => {
+      const record = req.result as StoredTrackEntity | undefined;
+      if (!record || !record.audioBlob || record.audioBlob.size === 0) {
+        resolve(undefined);
+        return;
+      }
 
-  if (!restoredBlob || restoredBlob.size === 0) return undefined;
+      let thumbnailUrl = record.thumbnailUrl || '';
+      if (!thumbnailUrl && record.thumbnailBlob) {
+        thumbnailUrl = await blobToDataUrl(record.thumbnailBlob);
+      }
 
-  return {
-    id: record.id,
-    title: record.title,
-    artist: record.artist,
-    duration: record.duration,
-    durationFormatted: record.durationFormatted,
-    thumbnailUrl: record.thumbnailUrl,
-    blob: restoredBlob,
-    createdAt: record.createdAt,
-  };
-};
-
-export const deleteTrack = async (id: string): Promise<void> => {
-  await del(`${TRACK_PREFIX}${id}`);
-};
-
-// Retrieve all tracks, migrate legacy records in background, and build fresh Blobs
-export const getAllTracks = async (): Promise<Track[]> => {
-  const allEntries = await entries<string, StoredTrackRecord>();
-  const tracks: Track[] = [];
-
-  for (const [key, record] of allEntries) {
-    if (!String(key).startsWith(TRACK_PREFIX)) continue;
-
-    let restoredBlob: Blob | null = null;
-
-    // 1. New binary format
-    if (record.audioBuffer) {
-      restoredBlob = new Blob([record.audioBuffer as BlobPart], {
-        type: record.mimeType || 'audio/mpeg',
-      });
-    }
-    // 2. Legacy format (re-use blob and auto-migrate to Uint8Array)
-    else if (record.blob && record.blob.size > 0) {
-      restoredBlob = record.blob;
-
-      (async () => {
-        try {
-          const buf = await record.blob!.arrayBuffer();
-          const migrated: StoredTrackRecord = {
-            id: record.id,
-            title: record.title,
-            artist: record.artist,
-            duration: record.duration,
-            durationFormatted: record.durationFormatted,
-            thumbnailUrl: record.thumbnailUrl,
-            audioBuffer: new Uint8Array(buf),
-            mimeType: record.blob!.type || 'audio/mpeg',
-            createdAt: record.createdAt,
-          };
-          await set(key, migrated);
-          console.log(`Auto-migrated "${record.title}" to persistent binary format.`);
-        } catch (e) {
-          console.warn('Auto-migration failed for track', record.id, e);
-        }
-      })();
-    }
-
-    // Only return tracks that have valid, playable data
-    if (restoredBlob && restoredBlob.size > 0) {
-      tracks.push({
+      resolve({
         id: record.id,
         title: record.title,
         artist: record.artist,
         duration: record.duration,
         durationFormatted: record.durationFormatted,
-        thumbnailUrl: record.thumbnailUrl,
-        blob: restoredBlob,
-        createdAt: record.createdAt,
+        thumbnailUrl,
+        blob: record.audioBlob,
+        audioBlob: record.audioBlob,
+        thumbnailBlob: record.thumbnailBlob,
+        createdAt: record.createdAt || record.downloadedAt,
+        downloadedAt: record.downloadedAt,
       });
-    }
-  }
+    };
 
-  return tracks.sort((a, b) => b.createdAt - a.createdAt);
+    req.onerror = () => reject(req.error);
+  });
+};
+
+// Delete a track from IndexedDB
+export const deleteTrack = async (id: string): Promise<void> => {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    const req = store.delete(id);
+
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  });
+};
+
+// Retrieve all tracks with automatic migration from older idb-keyval stores
+export const getAllTracks = async (): Promise<Track[]> => {
+  const db = await openDB();
+
+  // 1. Fetch records from music_app_db
+  const primaryTracks: Track[] = await new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readonly');
+    const store = tx.objectStore(STORE_NAME);
+    const req = store.getAll();
+
+    req.onsuccess = async () => {
+      const records = (req.result as StoredTrackEntity[]) || [];
+      const loaded: Track[] = [];
+
+      for (const rec of records) {
+        if (!rec.audioBlob || rec.audioBlob.size === 0) continue;
+
+        let thumb = rec.thumbnailUrl || '';
+        if (!thumb && rec.thumbnailBlob) {
+          thumb = await blobToDataUrl(rec.thumbnailBlob);
+        }
+
+        loaded.push({
+          id: rec.id,
+          title: rec.title,
+          artist: rec.artist,
+          duration: rec.duration,
+          durationFormatted: rec.durationFormatted,
+          thumbnailUrl: thumb,
+          blob: rec.audioBlob,
+          audioBlob: rec.audioBlob,
+          thumbnailBlob: rec.thumbnailBlob,
+          createdAt: rec.createdAt || rec.downloadedAt,
+          downloadedAt: rec.downloadedAt,
+        });
+      }
+      resolve(loaded);
+    };
+
+    req.onerror = () => reject(req.error);
+  });
+
+  // 2. Background check: Migrate any legacy records from idb-keyval
+  (async () => {
+    try {
+      const legacyEntries = await entries<string, any>();
+      for (const [key, value] of legacyEntries) {
+        if (!String(key).startsWith(LEGACY_PREFIX)) continue;
+        if (!value || typeof value !== 'object') continue;
+
+        const alreadyExists = primaryTracks.some((t) => t.id === value.id);
+        if (!alreadyExists && value.id) {
+          let audioBlob: Blob | null = null;
+          if (value.audioBuffer) {
+            audioBlob = new Blob([value.audioBuffer as BlobPart], {
+              type: value.mimeType || 'audio/mpeg',
+            });
+          } else if (value.blob instanceof Blob) {
+            audioBlob = value.blob;
+          }
+
+          if (audioBlob && audioBlob.size > 0) {
+            const thumbBlob = dataUrlToBlob(value.thumbnailUrl);
+            await saveTrack({
+              id: value.id,
+              title: value.title || 'Unknown Title',
+              artist: value.artist || 'Unknown Artist',
+              duration: value.duration || 0,
+              durationFormatted: value.durationFormatted || '0:00',
+              thumbnailUrl: value.thumbnailUrl || '',
+              blob: audioBlob,
+              audioBlob,
+              thumbnailBlob: thumbBlob,
+              createdAt: value.createdAt || Date.now(),
+              downloadedAt: value.createdAt || Date.now(),
+            });
+            console.log(`Migrated legacy track "${value.title}" to music_app_db.`);
+          }
+        }
+        // Remove legacy key after importing
+        await del(key);
+      }
+    } catch {
+      // Ignore background migration failures
+    }
+  })();
+
+  return primaryTracks.sort((a, b) => b.createdAt - a.createdAt);
 };
 
 export const getStorageStats = async (): Promise<{ totalBytes: number; formattedSize: string }> => {
@@ -144,81 +255,62 @@ export const getStorageStats = async (): Promise<{ totalBytes: number; formatted
 
 export const ensurePersistentStorage = async (): Promise<boolean> => {
   if (navigator.storage && navigator.storage.persist) {
-    const isPersisted = await navigator.storage.persist();
-    console.log(`Persistent storage granted: ${isPersisted}`);
-    return isPersisted;
+    return await navigator.storage.persist();
   }
   return false;
 };
 
-/**
- * Selective Garbage Collection:
- * 1. Scans IndexedDB and deletes entries with empty/corrupted/zero-byte buffers.
- * 2. Deletes ghost keys that don't match the track structure.
- * 3. Removes orphaned IDs from localStorage favorites whose tracks no longer exist.
- * 4. NEVER touches CacheStorage (preserving offline PWA HTML/CSS/JS) or active playable songs.
- */
+// Storage cleanup and pruning
 export const pruneStaleStorage = async (): Promise<CleanupResult> => {
   let freedBytes = 0;
   let prunedCount = 0;
   const validTrackIds = new Set<string>();
 
   try {
-    const allEntries = await entries<string, any>();
+    const db = await openDB();
 
-    for (const [key, record] of allEntries) {
-      const keyStr = String(key);
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      const req = store.openCursor();
 
-      // Only evaluate keys belonging to this app's store
-      if (keyStr.startsWith(TRACK_PREFIX)) {
-        let isValidTrack = false;
-        let recordBytes = 0;
+      req.onsuccess = (e) => {
+        const cursor = (e.target as IDBRequest<IDBCursorWithValue>).result;
+        if (cursor) {
+          const rec = cursor.value as StoredTrackEntity;
+          const size = rec.audioBlob?.size || 0;
 
-        if (record && typeof record === 'object') {
-          // Check Uint8Array or ArrayBuffer size
-          if (record.audioBuffer) {
-            recordBytes = record.audioBuffer.byteLength || 0;
-            if (recordBytes > 0) {
-              isValidTrack = true;
-            }
+          if (!rec.id || !rec.audioBlob || size === 0) {
+            freedBytes += size;
+            cursor.delete();
+            prunedCount++;
+          } else {
+            validTrackIds.add(rec.id);
           }
-          // Check legacy blob size
-          else if (record.blob && record.blob instanceof Blob) {
-            recordBytes = record.blob.size || 0;
-            if (recordBytes > 0) {
-              isValidTrack = true;
-            }
-          }
-        }
-
-        if (isValidTrack && record.id) {
-          validTrackIds.add(record.id);
+          cursor.continue();
         } else {
-          // Stale, aborted download, or corrupted 0-byte record
-          freedBytes += recordBytes;
-          await del(key);
-          prunedCount++;
-          console.log(`Pruned stale/corrupt record: ${keyStr}`);
+          resolve();
         }
-      }
-    }
+      };
 
-    // Clean orphaned favorite IDs from localStorage
+      req.onerror = () => reject(req.error);
+    });
+
+    // Sync favorites in localStorage
     try {
       const savedFavorites = localStorage.getItem('tunes_favorites');
       if (savedFavorites) {
         const parsedFavorites: string[] = JSON.parse(savedFavorites);
-        const filteredFavorites = parsedFavorites.filter((id) => validTrackIds.has(id));
-        if (filteredFavorites.length !== parsedFavorites.length) {
-          localStorage.setItem('tunes_favorites', JSON.stringify(filteredFavorites));
-          console.log('Synchronized favorites list with valid database tracks.');
+        const filtered = parsedFavorites.filter((id) => validTrackIds.has(id));
+        if (filtered.length !== parsedFavorites.length) {
+          localStorage.setItem('tunes_favorites', JSON.stringify(filtered));
         }
       }
-    } catch (favErr) {
-      console.warn('Could not prune favorites list', favErr);
+    } catch {
+      // Ignore
     }
   } catch (err) {
-    console.error('Error during storage optimization:', err);
+    console.error('Prune storage error:', err);
   }
 
   const freedFormatted = (freedBytes / (1024 * 1024)).toFixed(2) + ' MB';

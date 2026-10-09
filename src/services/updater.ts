@@ -4,7 +4,7 @@ export interface UpdateCheckResult {
 }
 
 export const checkForAppUpdate = async (): Promise<UpdateCheckResult> => {
-  // Step 1: Check basic device connectivity
+  // 1. Device network status check
   if (!navigator.onLine) {
     return {
       success: false,
@@ -12,69 +12,72 @@ export const checkForAppUpdate = async (): Promise<UpdateCheckResult> => {
     };
   }
 
-  // Step 2: Health-check probe to verify the server is live and serving the app
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3500); // 3.5s timeout
-
-    // Request the root HTML with a timestamp to bypass any local caching proxy
-    const probeResponse = await fetch(`/?_health=${Date.now()}`, {
-      method: 'GET',
-      cache: 'no-store',
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeoutId);
-
-    if (!probeResponse.ok) {
-      return {
-        success: false,
-        message: `Server returned error (${probeResponse.status}). Update aborted to preserve offline mode.`,
-      };
-    }
-
-    // Verify it actually returned HTML rather than a broken proxy error
-    const contentType = probeResponse.headers.get('content-type') || '';
-    if (!contentType.includes('text/html')) {
-      return {
-        success: false,
-        message: 'Invalid server response. Keeping current working version.',
-      };
-    }
-  } catch (err: any) {
-    console.warn('Server reachability probe failed:', err);
+  // 2. Service Worker API support check
+  if (!('serviceWorker' in navigator)) {
     return {
       success: false,
-      message: 'Dev server unreachable. Please make sure your laptop is on and reachable.',
+      message: 'Service Worker is not supported on this browser.',
     };
   }
 
-  // Step 3: Server is verified live - proceed to update Service Worker & caches safely
   try {
-    if ('serviceWorker' in navigator) {
-      const registrations = await navigator.serviceWorker.getRegistrations();
-      for (const registration of registrations) {
-        await registration.update();
-        if (registration.waiting) {
-          registration.waiting.postMessage({ type: 'SKIP_WAITING' });
+    let registration = await navigator.serviceWorker.getRegistration();
+
+    if (!registration) {
+      return {
+        success: false,
+        message: 'No active service worker registered.',
+      };
+    }
+
+    // Case A: A new update was already downloaded and is waiting
+    if (registration.waiting) {
+      registration.waiting.postMessage({ type: 'SKIP_WAITING' });
+      window.location.reload();
+      return {
+        success: true,
+        message: 'App updated to the newest version!',
+      };
+    }
+
+    // 3. Ask the browser to check the host server for sw.js byte changes
+    await registration.update();
+
+    // Re-fetch the registration so TypeScript doesn't narrow registration.waiting to 'never'
+    registration = await navigator.serviceWorker.getRegistration();
+
+    if (registration?.waiting) {
+      registration.waiting.postMessage({ type: 'SKIP_WAITING' });
+      window.location.reload();
+      return {
+        success: true,
+        message: 'App updated to the newest version!',
+      };
+    }
+
+    if (registration?.installing) {
+      const worker = registration.installing;
+      worker.addEventListener('statechange', () => {
+        if (worker.state === 'installed' && navigator.serviceWorker.controller) {
+          worker.postMessage({ type: 'SKIP_WAITING' });
+          window.location.reload();
         }
-      }
+      });
+      return {
+        success: true,
+        message: 'New update found! Installing in background...',
+      };
     }
 
-    // Step 4: Clear stale UI asset caches (IndexedDB audio is untouched)
-    if ('caches' in window) {
-      const cacheKeys = await caches.keys();
-      await Promise.all(cacheKeys.map((key) => caches.delete(key)));
-    }
-
-    // Reload into the fresh verified version
-    window.location.reload();
-    return { success: true, message: 'Updated successfully!' };
-  } catch (updateErr) {
-    console.error('Cache clearance failed:', updateErr);
+    return {
+      success: true,
+      message: 'Your app is already running the latest version!',
+    };
+  } catch (err: unknown) {
+    console.warn('Service worker update check failed:', err);
     return {
       success: false,
-      message: 'Could not apply updates. Continuing on current version.',
+      message: 'Dev server unreachable. Please verify your laptop is reachable.',
     };
   }
 };

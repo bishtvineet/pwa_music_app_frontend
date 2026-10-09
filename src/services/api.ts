@@ -1,6 +1,12 @@
 import type { VideoInfo, Track } from '../types';
 
-const BASE_URL = 'https://vineetbisht.tail02b0f1.ts.net';
+// const BASE_URL =
+//   import.meta.env.VITE_API_BASE_URL ||
+//   'https://vineetbisht.tail02b0f1.ts.net';
+
+const BASE_URL =
+  import.meta.env.VITE_API_BASE_URL ||
+  'https://pwa-music-app-backend.onrender.com';
 
 export interface ProgressCallbackData {
   percent: number; // 0 to 100, or -1 when indeterminate
@@ -22,27 +28,60 @@ const safeDecode = (str: string | null): string => {
 };
 
 export const formatDuration = (seconds: number): string => {
+  if (!seconds || seconds <= 0 || isNaN(seconds)) return '--:--';
   const mins = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60);
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 };
 
+// Accurately extracts duration in seconds from an audio Blob using the browser decoder
+export const getAudioDurationFromBlob = (blob: Blob): Promise<number> => {
+  return new Promise((resolve) => {
+    try {
+      const audio = new Audio();
+      const objectUrl = URL.createObjectURL(blob);
+      audio.src = objectUrl;
+
+      audio.onloadedmetadata = () => {
+        URL.revokeObjectURL(objectUrl);
+        const dur = Math.round(audio.duration);
+        resolve(!isNaN(dur) && isFinite(dur) ? dur : 0);
+      };
+
+      audio.onerror = () => {
+        URL.revokeObjectURL(objectUrl);
+        resolve(0);
+      };
+    } catch {
+      resolve(0);
+    }
+  });
+};
+
 // Downloads thumbnail image and converts it into a persistent Base64 string for 100% offline viewing
 export const fetchImageAsBase64 = async (url: string): Promise<string> => {
   if (!url) return '';
+  if (url.startsWith('data:image')) return url;
+
   try {
-    const res = await fetch(url);
-    if (!res.ok) return url;
-    const blob = await res.blob();
-    return await new Promise<string>((resolve) => {
-      const reader = new FileReader();
-      reader.onloadend = () => resolve(reader.result as string);
-      reader.onerror = () => resolve(url);
-      reader.readAsDataURL(blob);
-    });
-  } catch {
-    return url;
+    // Route image download through backend proxy to bypass CDN CORS
+    const proxyUrl = `${BASE_URL}/converter/thumbnail?url=${encodeURIComponent(url)}`;
+    const res = await fetch(proxyUrl);
+
+    if (res.ok) {
+      const blob = await res.blob();
+      return await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result as string);
+        reader.onerror = () => resolve(url);
+        reader.readAsDataURL(blob);
+      });
+    }
+  } catch (err) {
+    console.warn('[PWA] Failed to proxy thumbnail, falling back to URL:', err);
   }
+
+  return url;
 };
 
 export const checkHealth = async (): Promise<boolean> => {
@@ -66,7 +105,7 @@ export const fetchVideoInfo = async (url: string): Promise<VideoInfo> => {
   const contentType = res.headers.get('content-type') || '';
   if (!contentType.includes('application/json')) {
     throw new Error(
-      `Received non-JSON response from backend. Verify Tailscale connection and that NestJS is running.`
+      `Received non-JSON response from backend. Check backend status at ${BASE_URL}`
     );
   }
 
@@ -90,7 +129,7 @@ export const downloadAudioStream = async (
   while (attempt < maxRetries) {
     attempt++;
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s per attempt
+    const timeoutId = setTimeout(() => controller.abort(), 180000); // 3 minutes timeout
 
     try {
       if (attempt > 1 && onProgress) {
@@ -113,7 +152,7 @@ export const downloadAudioStream = async (
         throw new Error(`Download endpoint returned ${res.status}: ${res.statusText}`);
       }
 
-      // Extract custom metadata headers
+      // Extract metadata headers
       const rawTitle = res.headers.get('X-Audio-Title');
       const rawArtist = res.headers.get('X-Audio-Artist');
       const rawThumb = res.headers.get('X-Audio-Thumbnail');
@@ -121,7 +160,7 @@ export const downloadAudioStream = async (
       const title = previewFallback?.title || safeDecode(rawTitle) || 'Unknown Title';
       const artist = previewFallback?.channel || safeDecode(rawArtist) || 'Unknown Artist';
       const rawThumbnailUrl = previewFallback?.thumbnail || rawThumb || '';
-      const duration = previewFallback?.duration || Number(res.headers.get('X-Audio-Duration')) || 0;
+      let duration = previewFallback?.duration || Number(res.headers.get('X-Audio-Duration')) || 0;
       const id = previewFallback?.id || res.headers.get('X-Audio-Id') || `track_${Date.now()}`;
 
       const contentLengthHeader = res.headers.get('content-length');
@@ -154,7 +193,6 @@ export const downloadAudioStream = async (
                   statusText: `Downloading: ${percent}% (${(receivedBytes / (1024 * 1024)).toFixed(1)}MB / ${(totalBytes / (1024 * 1024)).toFixed(1)}MB)`,
                 });
               } else {
-                // If stream does not provide Content-Length, prevent 0% hang by showing live MBs
                 onProgress({
                   percent: -1,
                   receivedBytes,
@@ -168,7 +206,7 @@ export const downloadAudioStream = async (
 
         clearTimeout(timeoutId);
 
-        // Merge all chunks into a contiguous Uint8Array to prevent iOS WebKit audio playback bugs
+        // Merge chunks into a contiguous Uint8Array to prevent iOS WebKit playback issues
         const completeBinary = new Uint8Array(receivedBytes);
         let offset = 0;
         for (const chunk of chunks) {
@@ -180,7 +218,12 @@ export const downloadAudioStream = async (
         audioBlob = new Blob([completeBinary.buffer], { type: mimeType });
       }
 
-      // Convert thumbnail to local Base64 for offline availability
+      // If duration was 0 or missing from oEmbed fallback, decode from the blob directly
+      if (!duration || duration <= 0) {
+        duration = await getAudioDurationFromBlob(audioBlob);
+      }
+
+      // Convert thumbnail to Base64 for offline storage
       const offlineThumbnail = await fetchImageAsBase64(rawThumbnailUrl);
 
       return {
@@ -188,7 +231,7 @@ export const downloadAudioStream = async (
         title,
         artist,
         duration,
-        durationFormatted: previewFallback?.durationFormatted || formatDuration(duration),
+        durationFormatted: formatDuration(duration),
         thumbnailUrl: offlineThumbnail,
         blob: audioBlob,
         createdAt: Date.now(),
@@ -216,4 +259,23 @@ export const downloadAudioStream = async (
   }
 
   throw new Error('Download terminated unexpectedly');
+};
+
+export const syncCookiesToBackend = async (
+  input: string | File,
+): Promise<{ success: boolean; message: string; byteCount: number }> => {
+  const cookieText = typeof input === 'string' ? input : await input.text();
+
+  const res = await fetch(`${BASE_URL}/converter/cookies`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cookies: cookieText }),
+  });
+
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => null);
+    throw new Error(errorData?.message || 'Failed to update cookies on server.');
+  }
+
+  return await res.json();
 };

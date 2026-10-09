@@ -17,4 +17,8 @@ export interface Track {
   thumbnailUrl: string;
   blob: Blob;
   createdAt: number;
+  // Extended IndexedDB properties
+  audioBlob?: Blob;
+  thumbnailBlob?: Blob;
+  downloadedAt?: number;
 }
