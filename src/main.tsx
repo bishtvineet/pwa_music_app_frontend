@@ -4,11 +4,15 @@ import App from './App';
 import './index.css';
 import { registerSW } from 'virtual:pwa-register';
 
-// Registers service worker as soon as the app loads
-registerSW({ immediate: true });
-
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <App />
   </React.StrictMode>
 );
+
+// Register service worker after initial paint so first launch is instant
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    registerSW({ immediate: false });
+  });
+}

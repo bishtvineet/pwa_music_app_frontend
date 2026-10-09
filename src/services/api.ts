@@ -1,12 +1,5 @@
 import type { VideoInfo, Track } from '../types';
-
-// const BASE_URL =
-//   import.meta.env.VITE_API_BASE_URL ||
-//   'https://vineetbisht.tail02b0f1.ts.net';
-
-const BASE_URL =
-  import.meta.env.VITE_API_BASE_URL ||
-  'https://pwa-music-app-backend.onrender.com';
+import { getApiConfig, getRenderUrl } from './network';
 
 export interface ProgressCallbackData {
   percent: number; // 0 to 100, or -1 when indeterminate
@@ -63,9 +56,11 @@ export const fetchImageAsBase64 = async (url: string): Promise<string> => {
   if (!url) return '';
   if (url.startsWith('data:image')) return url;
 
+  const { baseUrl } = getApiConfig();
+
   try {
     // Route image download through backend proxy to bypass CDN CORS
-    const proxyUrl = `${BASE_URL}/converter/thumbnail?url=${encodeURIComponent(url)}`;
+    const proxyUrl = `${baseUrl}/converter/thumbnail?url=${encodeURIComponent(url)}`;
     const res = await fetch(proxyUrl);
 
     if (res.ok) {
@@ -84,9 +79,12 @@ export const fetchImageAsBase64 = async (url: string): Promise<string> => {
   return url;
 };
 
-export const checkHealth = async (): Promise<boolean> => {
+export const checkHealth = async (customBaseUrl?: string): Promise<boolean> => {
+  const { baseUrl } = getApiConfig();
+  const targetUrl = customBaseUrl || baseUrl;
+
   try {
-    const res = await fetch(`${BASE_URL}/health`, { method: 'GET' });
+    const res = await fetch(`${targetUrl}/health`, { method: 'GET' });
     if (!res.ok) return false;
     const data = await res.json();
     return data.status === 'ok';
@@ -96,16 +94,18 @@ export const checkHealth = async (): Promise<boolean> => {
 };
 
 export const fetchVideoInfo = async (url: string): Promise<VideoInfo> => {
-  const res = await fetch(`${BASE_URL}/converter/info`, {
+  const { baseUrl, networkMode } = getApiConfig();
+
+  const res = await fetch(`${baseUrl}/converter/info`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url }),
+    body: JSON.stringify({ url, networkMode }),
   });
 
   const contentType = res.headers.get('content-type') || '';
   if (!contentType.includes('application/json')) {
     throw new Error(
-      `Received non-JSON response from backend. Check backend status at ${BASE_URL}`
+      `Received non-JSON response from backend. Check backend status at ${baseUrl}`
     );
   }
 
@@ -125,6 +125,7 @@ export const downloadAudioStream = async (
   retryDelayMs = 2000
 ): Promise<Track> => {
   let attempt = 0;
+  const { baseUrl, networkMode } = getApiConfig();
 
   while (attempt < maxRetries) {
     attempt++;
@@ -141,10 +142,18 @@ export const downloadAudioStream = async (
         });
       }
 
-      const res = await fetch(`${BASE_URL}/converter/download`, {
+      const res = await fetch(`${baseUrl}/converter/download`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url }),
+        body: JSON.stringify({
+          url,
+          networkMode,
+          id: previewFallback?.id,
+          title: previewFallback?.title,
+          channel: previewFallback?.channel,
+          thumbnail: previewFallback?.thumbnail,
+          duration: previewFallback?.duration,
+        }),
         signal: controller.signal,
       });
 
@@ -265,8 +274,9 @@ export const syncCookiesToBackend = async (
   input: string | File,
 ): Promise<{ success: boolean; message: string; byteCount: number }> => {
   const cookieText = typeof input === 'string' ? input : await input.text();
+  const { baseUrl } = getApiConfig();
 
-  const res = await fetch(`${BASE_URL}/converter/cookies`, {
+  const res = await fetch(`${baseUrl}/converter/cookies`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ cookies: cookieText }),
@@ -278,4 +288,20 @@ export const syncCookiesToBackend = async (
   }
 
   return await res.json();
+};
+
+export const pingRenderHealth = async (): Promise<{ ok: boolean; timeMs: number }> => {
+  const renderUrl = getRenderUrl();
+  const startTime = performance.now();
+
+  try {
+    const res = await fetch(`${renderUrl}/health`, { method: 'GET' });
+    const timeMs = Math.round(performance.now() - startTime);
+    if (!res.ok) return { ok: false, timeMs };
+    const data = await res.json();
+    return { ok: data?.status === 'ok', timeMs };
+  } catch {
+    const timeMs = Math.round(performance.now() - startTime);
+    return { ok: false, timeMs };
+  }
 };

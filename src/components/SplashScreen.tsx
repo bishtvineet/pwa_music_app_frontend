@@ -9,26 +9,33 @@ interface SplashScreenProps {
 
 export const SplashScreen: React.FC<SplashScreenProps> = ({ onFinish, backgroundConfig }) => {
   const [stage, setStage] = useState<'intro' | 'showQuote' | 'shatter' | 'dissolved'>('intro');
+  const [isVisible, setIsVisible] = useState(false);
   const [quote] = useState(() => {
     const idx = Math.floor(Math.random() * MUSIC_QUOTES.length);
     return MUSIC_QUOTES[idx];
   });
 
   useEffect(() => {
+    // Ensure the browser renders frame 0 at opacity 0 before fading in smoothly
+    const timer = setTimeout(() => {
+      setIsVisible(true);
+    }, 20);
+
     const quoteTimer = setTimeout(() => {
       setStage('showQuote');
-    }, 850);
+    }, 600);
 
     const shatterTimer = setTimeout(() => {
       setStage('shatter');
-    }, 3100);
+    }, 2800);
 
     const finishTimer = setTimeout(() => {
       setStage('dissolved');
       onFinish();
-    }, 3900);
+    }, 3400);
 
     return () => {
+      clearTimeout(timer);
       clearTimeout(quoteTimer);
       clearTimeout(shatterTimer);
       clearTimeout(finishTimer);
@@ -48,20 +55,27 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onFinish, background
 
   return (
     <div
-      className={`fixed inset-0 w-full h-[100dvh] max-w-md mx-auto z-50 select-none overflow-hidden transition-all duration-700 ease-in-out ${
+      style={{
+        WebkitBackfaceVisibility: 'hidden',
+        backfaceVisibility: 'hidden',
+        transform: 'translateZ(0)',
+      }}
+      className={`fixed inset-0 w-full h-full max-w-md mx-auto z-50 select-none overflow-hidden bg-[#06040A] transition-all duration-700 ease-in-out ${
         isShattering
           ? 'opacity-0 backdrop-blur-3xl pointer-events-none scale-105'
-          : 'opacity-100 scale-100'
+          : isVisible
+          ? 'opacity-100 scale-100'
+          : 'opacity-0 scale-[0.98]'
       }`}
     >
       {/* 1. DUAL-LAYER SEAMLESS BLEND BACKGROUND */}
       {backgroundConfig?.image ? (
         <div className="absolute inset-0 w-full h-full overflow-hidden pointer-events-none z-0 bg-[#06040A]">
-          {/* Layer 1: Ambient Blurred Base (Fills screen margins with genuine photo tones) */}
+          {/* Layer 1: Ambient Blurred Base */}
           <div className="absolute inset-0 w-full h-full overflow-hidden">
             <img
               src={backgroundConfig.image}
-              alt="Ambient Blurred Base"
+              alt=""
               className="w-full h-full object-cover scale-125 filter blur-[52px] brightness-[0.32] contrast-125"
             />
           </div>
@@ -102,9 +116,8 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onFinish, background
       />
       <div className="absolute bottom-1/4 left-1/2 -translate-x-1/2 w-96 h-96 bg-purple-600/25 blur-[130px] pointer-events-none z-[1]" />
 
-      {/* 4. CENTER HERO: "LAVI CREATION" (3D Chiseled Bevel & Emboss) */}
+      {/* 3. CENTER HERO: "LAVI CREATION" */}
       <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-20 flex flex-col items-center justify-center w-full px-4 pointer-events-none">
-
         {/* 3D Beveled LAVI Letters */}
         <div className="flex items-center gap-2 mb-3.5">
           {laviConfig.map(({ char, scatter }, i) => (
@@ -113,11 +126,13 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onFinish, background
               className={`bevel-lavi inline-block text-5xl sm:text-6xl font-black tracking-wider transition-all duration-700 ease-out ${
                 isShattering
                   ? `${scatter} opacity-0 blur-md`
-                  : 'animate-in fade-in slide-in-from-top-24 duration-700 fill-mode-both'
+                  : isVisible
+                  ? 'opacity-100 translate-y-0 scale-100'
+                  : 'opacity-0 -translate-y-4 scale-95'
               }`}
               style={{
-                animationDelay: isShattering ? '0ms' : `${i * 110}ms`,
-                animationTimingFunction: 'cubic-bezier(0.34, 1.56, 0.64, 1)',
+                transitionDelay: isShattering ? '0ms' : `${i * 70}ms`,
+                transitionTimingFunction: 'cubic-bezier(0.16, 1, 0.3, 1)',
               }}
             >
               {char}
@@ -130,17 +145,26 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onFinish, background
           className={`bevel-pill relative px-6 py-2 rounded-full bg-white/[0.08] border border-white/20 backdrop-blur-2xl flex items-center justify-center overflow-hidden transition-all duration-500 ease-out ${
             isShattering
               ? 'scale-125 opacity-0 blur-lg border-white/50'
-              : 'animate-in fade-in zoom-in-75 duration-700 fill-mode-both'
+              : isVisible
+              ? 'opacity-100 scale-100'
+              : 'opacity-0 scale-90'
           }`}
-          style={{ animationDelay: '500ms' }}
+          style={{
+            transitionDelay: isShattering ? '0ms' : '280ms',
+            transitionTimingFunction: 'cubic-bezier(0.16, 1, 0.3, 1)',
+          }}
         >
           <div className="absolute inset-x-0 top-0 h-[1px] bg-gradient-to-r from-transparent via-white/70 to-transparent" />
           <div className="flex items-center tracking-[0.38em] text-[11px] sm:text-xs font-black uppercase pl-[0.38em]">
             {creationLetters.map((char, idx) => (
               <span
                 key={idx}
-                className="emboss-creation inline-block animate-in fade-in duration-500 fill-mode-both"
-                style={{ animationDelay: `${550 + idx * 35}ms` }}
+                className={`emboss-creation inline-block transition-all duration-400 ease-out ${
+                  isVisible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-1'
+                }`}
+                style={{
+                  transitionDelay: `${300 + idx * 25}ms`,
+                }}
               >
                 {char}
               </span>
@@ -148,8 +172,13 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onFinish, background
           </div>
         </div>
 
-        {/* Active Mini Spectrum Equalizer */}
-        <div className="flex items-center gap-1 mt-6 opacity-85">
+        {/* Spectrum Equalizer */}
+        <div
+          className={`flex items-center gap-1 mt-6 transition-opacity duration-500 ${
+            isVisible ? 'opacity-85' : 'opacity-0'
+          }`}
+          style={{ transitionDelay: '450ms' }}
+        >
           <span className="w-1.5 h-3 rounded-full bg-red-500 animate-pulse [animation-duration:1s]" />
           <span className="w-1.5 h-5 rounded-full bg-purple-500 animate-pulse [animation-duration:1.4s]" />
           <span className="w-1.5 h-7 rounded-full bg-pink-500 animate-pulse [animation-duration:0.9s]" />
@@ -158,14 +187,14 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({ onFinish, background
         </div>
       </div>
 
-      {/* 5. INDEPENDENT QUOTE LAYER */}
+      {/* 4. INDEPENDENT QUOTE LAYER */}
       <div
         className={`absolute bottom-8 left-0 right-0 px-6 z-30 transition-all duration-700 ease-out transform ${
           stage === 'showQuote'
             ? 'opacity-100 translate-y-0 scale-100'
             : isShattering
             ? 'opacity-0 translate-y-8 scale-95 blur-sm'
-            : 'opacity-0 translate-y-12 scale-95'
+            : 'opacity-0 translate-y-8 scale-95'
         }`}
       >
         <div className="w-full max-w-sm mx-auto">
